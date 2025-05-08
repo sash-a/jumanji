@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from functools import cached_property
-from typing import Tuple, override
+from typing import Tuple
 
 import chex
 import jax
@@ -32,19 +32,31 @@ class TMaze(Environment):
         self.width = width  # only the width of the one side of the T
         self.time_limit = time_limit
 
+        self.left_target = jnp.array([self.length, -self.width])
+        self.right_target = jnp.array([self.length, 1 + self.width])
+
+        self.start_positions = jnp.array([[0, 0], [0, 1]])
+        self.target_positions = jnp.stack([self.left_target, self.right_target], axis=0)
+
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
-        key, position_key = jax.random.split(key)
-        possible_possitions = jnp.array([[0, 0], [0, 1]])
+        key, position_key, target_key = jax.random.split(key, 3)
+
         a0_pos_idx = jax.random.randint(position_key, (), 0, 2)
-        a0_pos = possible_possitions[a0_pos_idx]
-        a1_pos = possible_possitions[1 - a0_pos_idx]
+        a0_pos = self.start_positions[a0_pos_idx]
+        a1_pos = self.start_positions[1 - a0_pos_idx]
+
+        a0_target_idx = jax.random.randint(target_key, (), 0, 2)
+        a0_target = self.target_positions[a0_target_idx]
+        a1_target = self.target_positions[1 - a0_target_idx]
 
         positions = jnp.stack([a0_pos, a1_pos], axis=0)
+        targets = jnp.stack([a0_target, a1_target], axis=0)
+        # TODO:
         action_mask = jnp.zeros((2, 6), dtype=bool).at[:, 4].set(True).at[:, 5].set(True)
 
         state = State(
             agent_positions=positions,
-            agent_targets=jnp.zeros((2, 2), dtype=jnp.int32),
+            agent_targets=targets,
             step_count=jnp.zeros((), jnp.int32),
             key=key,
         )
@@ -53,23 +65,24 @@ class TMaze(Environment):
         return state, restart(obs)
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
-        return jax.lax.cond(
-            state.step_count == 0, self.step_goal_select, self.step_movement, state, action
-        )
+        return self.step_movement(state, action)
+        # return jax.lax.cond(
+        #     state.step_count == 0, self.step_goal_select, self.step_movement, state, action
+        # )
 
-    def step_goal_select(
-        self, state: State, action: chex.Array
-    ) -> Tuple[State, TimeStep[Observation]]:
-        # TODO: what if both select the same goal?
-        goal_left = [self.length, -self.width]
-        goal_right = [self.length, 1 + self.width]
-        goals = jnp.array([[-1, -1], [-1, -1], [-1, -1], [-1, -1], goal_left, goal_right])
-
-        new_state = state.replace(agent_targets=goals[action], step_count=state.step_count + 1)
-
-        action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
-        obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
-        return new_state, transition(jnp.zeros(2, dtype=jnp.float32), obs)
+    # def step_goal_select(
+    #     self, state: State, action: chex.Array
+    # ) -> Tuple[State, TimeStep[Observation]]:
+    #     # TODO: what if both select the same goal?
+    #     goal_left = [self.length, -self.width]
+    #     goal_right = [self.length, 1 + self.width]
+    #     goals = jnp.array([[-1, -1], [-1, -1], [-1, -1], [-1, -1], goal_left, goal_right])
+    #
+    #     new_state = state.replace(agent_targets=goals[action], step_count=state.step_count + 1)
+    #
+    #     action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
+    #     obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
+    #     return new_state, transition(jnp.zeros(2, dtype=jnp.float32), obs)
 
     def step_movement(
         self, state: State, action: chex.Array
@@ -100,7 +113,15 @@ class TMaze(Environment):
         a0_obs = self.get_agent_obs(state, state.agent_positions[0])
         a1_obs = self.get_agent_obs(state, state.agent_positions[1])
 
-        return jnp.stack([a0_obs, a1_obs], axis=0)
+        target_obs = jax.lax.cond(
+            state.step_count == 0,
+            lambda: jnp.all((state.agent_targets == self.left_target), axis=1).astype(jnp.int32),
+            lambda: jnp.array([-1, -1]),
+        )
+
+        obs = jnp.stack([a0_obs, a1_obs], axis=0)
+        obs = jnp.concatenate([obs, target_obs[:, jnp.newaxis]], axis=-1)
+        return obs
 
     def get_agent_obs(self, state: State, agent_position: jax.Array) -> jax.Array:
         surrounding_cell_values = self.surrounding_points(agent_position)
@@ -130,8 +151,8 @@ class TMaze(Environment):
     def valid_position(self, state: State, new_position: jax.Array) -> bool:
         return (
             self.is_cell_in_bounds(new_position)
-            # TODO: seems to be a bug here?
             & jnp.any(new_position != state.agent_positions, axis=0).all()  # not on top of an agent
+            & jnp.all(new_position[0] == new_position[1])  # not moving into same position.
         )
 
     def surrounding_points(self, cell_pos: jax.Array) -> jax.Array:
