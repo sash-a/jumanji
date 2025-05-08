@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 from jumanji import Environment
 from jumanji.environments.routing.tmaze.types import Observation, State
-from jumanji.types import TimeStep, restart, transition
+from jumanji.types import TimeStep, restart, termination, transition
 
 
 class TMaze(Environment):
@@ -65,34 +65,13 @@ class TMaze(Environment):
         return state, restart(obs)
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
-        return self.step_movement(state, action)
-        # return jax.lax.cond(
-        #     state.step_count == 0, self.step_goal_select, self.step_movement, state, action
-        # )
-
-    # def step_goal_select(
-    #     self, state: State, action: chex.Array
-    # ) -> Tuple[State, TimeStep[Observation]]:
-    #     # TODO: what if both select the same goal?
-    #     goal_left = [self.length, -self.width]
-    #     goal_right = [self.length, 1 + self.width]
-    #     goals = jnp.array([[-1, -1], [-1, -1], [-1, -1], [-1, -1], goal_left, goal_right])
-    #
-    #     new_state = state.replace(agent_targets=goals[action], step_count=state.step_count + 1)
-    #
-    #     action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
-    #     obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
-    #     return new_state, transition(jnp.zeros(2, dtype=jnp.float32), obs)
-
-    def step_movement(
-        self, state: State, action: chex.Array
-    ) -> Tuple[State, TimeStep[Observation]]:
         # UP, RIGHT, DOWN, LEFT
         possible_moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
         moves = possible_moves[action]
         new_positions = moves + state.agent_positions
 
-        valid_move = jax.vmap(self.valid_position, (None, 0))(state, new_positions)
+        not_colliding = jnp.any(new_positions[0] != new_positions[1])
+        valid_move = jax.vmap(self.valid_position, (None, 0))(state, new_positions) & not_colliding
         new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
         # TODO:
         action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
@@ -105,9 +84,13 @@ class TMaze(Environment):
         )
         obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
 
-        reward = jnp.all(new_positions == state.agent_targets, axis=0).astype(jnp.float32)
+        reward = jnp.all(new_positions == state.agent_targets, axis=-1).astype(jnp.float32)
 
-        return new_state, transition(reward, obs)  # TODO: termination
+        done_horizon = new_state.step_count >= self.time_limit
+        found_targets = jnp.all(reward == jnp.array([1.0, 1.0]))
+
+        ts = jax.lax.cond(done_horizon | found_targets, termination, transition, reward, obs)
+        return new_state, ts
 
     def get_obs(self, state: State) -> jax.Array:
         a0_obs = self.get_agent_obs(state, state.agent_positions[0])
@@ -115,7 +98,7 @@ class TMaze(Environment):
 
         target_obs = jax.lax.cond(
             state.step_count == 0,
-            lambda: jnp.all((state.agent_targets == self.left_target), axis=1).astype(jnp.int32),
+            lambda: jnp.all((state.agent_targets == self.left_target), axis=-1).astype(jnp.int32),
             lambda: jnp.array([-1, -1]),
         )
 
@@ -135,8 +118,8 @@ class TMaze(Environment):
         # 0 if empty cell
         return (
             (-1 * ~in_bounds)
-            + (1 * jnp.all(cell_pos == state.agent_positions[0], axis=0))
-            + (2 * jnp.all(cell_pos == state.agent_positions[1], axis=0))
+            + (1 * jnp.all(cell_pos == state.agent_positions[0], axis=-1))
+            + (2 * jnp.all(cell_pos == state.agent_positions[1], axis=-1))
         )
 
     def is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
@@ -149,10 +132,10 @@ class TMaze(Environment):
         )
 
     def valid_position(self, state: State, new_position: jax.Array) -> bool:
-        return (
+        return (  # type: ignore
             self.is_cell_in_bounds(new_position)
-            & jnp.any(new_position != state.agent_positions, axis=0).all()  # not on top of an agent
-            & jnp.all(new_position[0] == new_position[1])  # not moving into same position.
+            # not on top of an agent
+            & jnp.any(new_position != state.agent_positions, axis=1).all()            
         )
 
     def surrounding_points(self, cell_pos: jax.Array) -> jax.Array:
