@@ -39,7 +39,7 @@ class TMaze(Environment):
         a0_pos = possible_possitions[a0_pos_idx]
         a1_pos = possible_possitions[1 - a0_pos_idx]
 
-        positions = jnp.stack([a0_pos, a1_pos], axis=-1)
+        positions = jnp.stack([a0_pos, a1_pos], axis=0)
         action_mask = jnp.zeros((2, 6), dtype=bool).at[:, 4].set(True).at[:, 5].set(True)
 
         state = State(
@@ -56,11 +56,11 @@ class TMaze(Environment):
         # TODO: if step count is 0 then set the agent_targets
         # UP, RIGHT, DOWN, LEFT
         possible_moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
-        moves = possible_moves[action].T
+        moves = possible_moves[action]
         new_positions = moves + state.agent_positions
 
-        valid_move = jax.vmap(self.valid_position, (None, 1))(state, new_positions)
-        new_positions = jnp.where(valid_move[jnp.newaxis], new_positions, state.agent_positions)
+        valid_move = jax.vmap(self.valid_position, (None, 0))(state, new_positions)
+        new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
         # TODO:
         action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
 
@@ -77,8 +77,8 @@ class TMaze(Environment):
         return new_state, transition(reward, obs)  # TODO: termination
 
     def get_obs(self, state: State) -> jax.Array:
-        a0_obs = self.get_agent_obs(state, state.agent_positions[:, 0])
-        a1_obs = self.get_agent_obs(state, state.agent_positions[:, 1])
+        a0_obs = self.get_agent_obs(state, state.agent_positions[0])
+        a1_obs = self.get_agent_obs(state, state.agent_positions[1])
 
         return jnp.stack([a0_obs, a1_obs], axis=0)
 
@@ -94,8 +94,8 @@ class TMaze(Environment):
         # 0 if empty cell
         return (
             (-1 * ~in_bounds)
-            + (1 * jnp.all(cell_pos == state.agent_positions[:, 0], axis=0))
-            + (2 * jnp.all(cell_pos == state.agent_positions[:, 1], axis=0))
+            + (1 * jnp.all(cell_pos == state.agent_positions[0], axis=0))
+            + (2 * jnp.all(cell_pos == state.agent_positions[1], axis=0))
         )
 
     def is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
