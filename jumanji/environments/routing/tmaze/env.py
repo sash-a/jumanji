@@ -25,8 +25,8 @@ from jumanji.types import TimeStep, restart, termination, transition
 
 
 class TMaze(Environment):
-    def __init__(self, length: int, width: int, time_limit: int = 20) -> None:
-        self.time_limit = time_limit
+    def __init__(self, length: int, width: int, time_limit: int | None = None) -> None:
+        self.time_limit = time_limit or (length + width) * 2
         super().__init__()
 
         self.length = length
@@ -38,8 +38,8 @@ class TMaze(Environment):
         self.start_positions = jnp.array([[0, 0], [0, 1]])
         self.target_positions = jnp.stack([self.left_target, self.right_target], axis=0)
 
-        # UP, RIGHT, DOWN, LEFT
-        self.moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
+        # NOOP, UP, RIGHT, DOWN, LEFT
+        self.moves = jnp.array([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]])
 
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
         key, position_key, target_key = jax.random.split(key, 3)
@@ -71,7 +71,8 @@ class TMaze(Environment):
         new_positions = moves + state.agent_positions
 
         not_colliding = jnp.any(new_positions[0] != new_positions[1])
-        valid_move = jax.vmap(self.valid_position, (None, 0))(state, new_positions) & not_colliding
+        valid_next_pos = jax.vmap(self.valid_position, (None, 0))(state, new_positions)
+        valid_move = (valid_next_pos & not_colliding) | (action == 0)  # NOOP always valid
         new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
 
         new_state = State(
@@ -163,7 +164,8 @@ class TMaze(Environment):
 
     def get_action_mask(self, state: State, my_pos: jax.Array) -> jax.Array:
         possible_pos = my_pos + self.moves
-        return jax.vmap(self.valid_position, (None, 0))(state, possible_pos)
+        mask = jax.vmap(self.valid_position, (None, 0))(state, possible_pos)
+        return mask.at[0].set(True)  # NOOP always valid
 
     @cached_property
     def observation_spec(self) -> specs.Spec[Observation]:
