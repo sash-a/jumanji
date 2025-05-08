@@ -19,18 +19,18 @@ import chex
 import jax
 import jax.numpy as jnp
 
-from jumanji import Environment
+from jumanji import Environment, specs
 from jumanji.environments.routing.tmaze.types import Observation, State
 from jumanji.types import TimeStep, restart, termination, transition
 
 
 class TMaze(Environment):
     def __init__(self, length: int, width: int, time_limit: int = 20) -> None:
+        self.time_limit = time_limit
         super().__init__()
 
         self.length = length
         self.width = width  # only the width of the one side of the T
-        self.time_limit = time_limit
 
         self.left_target = jnp.array([self.length, -self.width])
         self.right_target = jnp.array([self.length, 1 + self.width])
@@ -135,7 +135,7 @@ class TMaze(Environment):
         return (  # type: ignore
             self.is_cell_in_bounds(new_position)
             # not on top of an agent
-            & jnp.any(new_position != state.agent_positions, axis=1).all()            
+            & jnp.any(new_position != state.agent_positions, axis=1).all()
         )
 
     def surrounding_points(self, cell_pos: jax.Array) -> jax.Array:
@@ -154,12 +154,31 @@ class TMaze(Environment):
         )
         return cell_pos + surrounding_vecs
 
-    # TODO
     @cached_property
-    def observation_spec(self) -> None:
-        return 2
+    def observation_spec(self) -> specs.Spec[Observation]:
+        agents_view = specs.BoundedArray(
+            shape=(2, 10), dtype=jnp.int32, name="grid", minimum=-1, maximum=2
+        )
+        action_mask = specs.BoundedArray(
+            shape=(2, 4), dtype=bool, minimum=False, maximum=True, name="action_mask"
+        )
+        step_count = specs.BoundedArray(
+            shape=(),
+            dtype=jnp.int32,
+            minimum=0,
+            maximum=self.time_limit,
+            name="step_count",
+        )
+        return specs.Spec(
+            Observation,
+            "ObservationSpec",
+            agents_view=agents_view,
+            action_mask=action_mask,
+            step_count=step_count,
+        )
 
-    # TODO
     @cached_property
-    def action_spec(self) -> None:
-        return 1
+    def action_spec(self) -> specs.MultiDiscreteArray:
+        return specs.MultiDiscreteArray(
+            num_values=jnp.array([5] * 2), dtype=jnp.int32, name="action"
+        )
