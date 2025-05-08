@@ -38,6 +38,9 @@ class TMaze(Environment):
         self.start_positions = jnp.array([[0, 0], [0, 1]])
         self.target_positions = jnp.stack([self.left_target, self.right_target], axis=0)
 
+        # UP, RIGHT, DOWN, LEFT
+        self.moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
+
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
         key, position_key, target_key = jax.random.split(key, 3)
 
@@ -51,8 +54,6 @@ class TMaze(Environment):
 
         positions = jnp.stack([a0_pos, a1_pos], axis=0)
         targets = jnp.stack([a0_target, a1_target], axis=0)
-        # TODO:
-        action_mask = jnp.zeros((2, 6), dtype=bool).at[:, 4].set(True).at[:, 5].set(True)
 
         state = State(
             agent_positions=positions,
@@ -60,27 +61,27 @@ class TMaze(Environment):
             step_count=jnp.zeros((), jnp.int32),
             key=key,
         )
+        action_mask = jax.vmap(self.get_action_mask, (None, 0))(state, state.agent_positions)
         obs = Observation(self.get_obs(state), action_mask, jnp.zeros((), jnp.int32))
 
         return state, restart(obs)
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
-        # UP, RIGHT, DOWN, LEFT
-        possible_moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
-        moves = possible_moves[action]
+        moves = self.moves[action]
         new_positions = moves + state.agent_positions
 
         not_colliding = jnp.any(new_positions[0] != new_positions[1])
         valid_move = jax.vmap(self.valid_position, (None, 0))(state, new_positions) & not_colliding
         new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
-        # TODO:
-        action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
 
         new_state = State(
             agent_positions=new_positions,
             agent_targets=state.agent_targets,
             step_count=state.step_count + 1,
             key=state.key,
+        )
+        action_mask = jax.vmap(self.get_action_mask, (None, 0))(
+            new_state, new_state.agent_positions
         )
         obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
 
@@ -137,8 +138,8 @@ class TMaze(Environment):
             is_on_horizontal & (y >= -self.width) & (y <= 1 + self.width)
         )
 
-    def valid_position(self, state: State, new_position: jax.Array) -> bool:
-        return (  # type: ignore
+    def valid_position(self, state: State, new_position: jax.Array) -> jax.Array:
+        return (
             self.is_cell_in_bounds(new_position)
             # not on top of an agent
             & jnp.any(new_position != state.agent_positions, axis=1).all()
@@ -159,6 +160,10 @@ class TMaze(Environment):
             ]
         )
         return cell_pos + surrounding_vecs
+
+    def get_action_mask(self, state: State, my_pos: jax.Array) -> jax.Array:
+        possible_pos = my_pos + self.moves
+        return jax.vmap(self.valid_position, (None, 0))(state, possible_pos)
 
     @cached_property
     def observation_spec(self) -> specs.Spec[Observation]:
