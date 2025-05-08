@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from functools import cached_property
-from typing import Tuple
+from typing import Tuple, override
 
 import chex
 import jax
@@ -53,7 +53,27 @@ class TMaze(Environment):
         return state, restart(obs)
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
-        # TODO: if step count is 0 then set the agent_targets
+        return jax.lax.cond(
+            state.step_count == 0, self.step_goal_select, self.step_movement, state, action
+        )
+
+    def step_goal_select(
+        self, state: State, action: chex.Array
+    ) -> Tuple[State, TimeStep[Observation]]:
+        # TODO: what if both select the same goal?
+        goal_left = [self.length, -self.width]
+        goal_right = [self.length, 1 + self.width]
+        goals = jnp.array([[-1, -1], [-1, -1], [-1, -1], [-1, -1], goal_left, goal_right])
+
+        new_state = state.replace(agent_targets=goals[action], step_count=state.step_count + 1)
+
+        action_mask = jnp.ones((2, 6), dtype=bool).at[:, 4].set(False).at[:, 5].set(False)
+        obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
+        return new_state, transition(jnp.zeros(2, dtype=jnp.float32), obs)
+
+    def step_movement(
+        self, state: State, action: chex.Array
+    ) -> Tuple[State, TimeStep[Observation]]:
         # UP, RIGHT, DOWN, LEFT
         possible_moves = jnp.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
         moves = possible_moves[action]
@@ -72,7 +92,7 @@ class TMaze(Environment):
         )
         obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
 
-        reward = jnp.all(new_positions == state.agent_targets, axis=0)
+        reward = jnp.all(new_positions == state.agent_targets, axis=0).astype(jnp.float32)
 
         return new_state, transition(reward, obs)  # TODO: termination
 
@@ -104,7 +124,7 @@ class TMaze(Environment):
         is_on_horizontal = x == self.length
 
         return (is_on_vertical & ((y == 0) | (y == 1))) | (
-            is_on_horizontal & (y > -self.width) & (y < 1 + self.width)
+            is_on_horizontal & (y >= -self.width) & (y <= 1 + self.width)
         )
 
     def valid_position(self, state: State, new_position: jax.Array) -> bool:
