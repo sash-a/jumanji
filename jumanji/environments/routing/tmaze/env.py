@@ -21,16 +21,20 @@ import jax.numpy as jnp
 
 from jumanji import Environment, specs
 from jumanji.environments.routing.tmaze.types import Observation, State
-from jumanji.types import TimeStep, restart, termination, transition
+from jumanji.types import StepType, TimeStep, termination, transition
 
 
 class TMaze(Environment):
     def __init__(self, length: int, width: int, time_limit: int | None = None) -> None:
         self.time_limit = time_limit or (length + width) * 2
-        super().__init__()
-
         self.length = length
         self.width = width  # only the width of the one side of the T
+
+        super().__init__()
+
+        # Mava params
+        self.num_agents = 2
+        self.action_dim = 5
 
         self.left_target = jnp.array([self.length, -self.width])
         self.right_target = jnp.array([self.length, 1 + self.width])
@@ -62,9 +66,16 @@ class TMaze(Environment):
             key=key,
         )
         action_mask = jax.vmap(self.get_action_mask, (None, 0))(state, state.agent_positions)
-        obs = Observation(self.get_obs(state), action_mask, jnp.zeros((), jnp.int32))
+        obs = Observation(self.get_obs(state), action_mask, jnp.zeros((2,), jnp.int32))
 
-        return state, restart(obs)
+        ts = TimeStep(
+            step_type=StepType.FIRST,
+            reward=jnp.zeros((2,), dtype=jnp.float32),
+            discount=jnp.ones((), dtype=jnp.float32),
+            observation=obs,
+            extras={"env_metrics": {}},
+        )
+        return state, ts
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
         moves = self.moves[action]
@@ -84,14 +95,15 @@ class TMaze(Environment):
         action_mask = jax.vmap(self.get_action_mask, (None, 0))(
             new_state, new_state.agent_positions
         )
-        obs = Observation(self.get_obs(new_state), action_mask, new_state.step_count)
-
-        reward = jnp.all(new_positions == state.agent_targets, axis=-1).astype(jnp.float32)
 
         done_horizon = new_state.step_count >= self.time_limit
-        found_targets = jnp.all(reward == jnp.array([1.0, 1.0]))
+        found_targets = jnp.all(new_positions == state.agent_targets)
+        reward = jnp.ones(2, dtype=jnp.float32) * found_targets
 
+        step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
+        obs = Observation(self.get_obs(new_state), action_mask, step_count)
         ts = jax.lax.cond(done_horizon | found_targets, termination, transition, reward, obs)
+        ts.extras = {"env_metrics": {}}
         return new_state, ts
 
     def get_obs(self, state: State) -> jax.Array:
@@ -173,10 +185,10 @@ class TMaze(Environment):
             shape=(2, 10), dtype=jnp.int32, name="grid", minimum=-1, maximum=2
         )
         action_mask = specs.BoundedArray(
-            shape=(2, 4), dtype=bool, minimum=False, maximum=True, name="action_mask"
+            shape=(2, 5), dtype=bool, minimum=False, maximum=True, name="action_mask"
         )
         step_count = specs.BoundedArray(
-            shape=(),
+            shape=(2,),
             dtype=jnp.int32,
             minimum=0,
             maximum=self.time_limit,
