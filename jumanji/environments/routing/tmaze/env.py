@@ -93,8 +93,8 @@ class TMaze(Environment):
         return new_state, ts
 
     def get_obs(self, state: State) -> jax.Array:
-        a0_obs = self.get_agent_obs(state, state.agent_positions[0])
-        a1_obs = self.get_agent_obs(state, state.agent_positions[1])
+        a0_obs = self.get_agent_obs(state, state.agent_positions[0], state.agent_positions[1])
+        a1_obs = self.get_agent_obs(state, state.agent_positions[1], state.agent_positions[0])
 
         target_obs = jax.lax.cond(
             state.step_count == 0,
@@ -106,11 +106,17 @@ class TMaze(Environment):
         obs = jnp.concatenate([obs, target_obs[:, jnp.newaxis]], axis=-1)
         return obs
 
-    def get_agent_obs(self, state: State, agent_position: jax.Array) -> jax.Array:
+    def get_agent_obs(
+        self, state: State, agent_position: jax.Array, team_position: jax.Array
+    ) -> jax.Array:
         surrounding_cell_values = self.surrounding_points(agent_position)
-        return jax.vmap(self.get_cell_value, (None, 0))(state, surrounding_cell_values)
+        return jax.vmap(self.get_cell_value, (None, None, 0))(
+            agent_position,
+            team_position,
+            surrounding_cell_values,
+        )
 
-    def get_cell_value(self, state: State, cell_pos: jax.Array) -> jax.Array:
+    def get_cell_value(self, my_pos, team_pos, cell_pos: jax.Array) -> jax.Array:
         in_bounds = self.is_cell_in_bounds(cell_pos)
         # -1 if out of bounds
         # 1 if agent 1
@@ -118,8 +124,8 @@ class TMaze(Environment):
         # 0 if empty cell
         return (
             (-1 * ~in_bounds)
-            + (1 * jnp.all(cell_pos == state.agent_positions[0], axis=-1))
-            + (2 * jnp.all(cell_pos == state.agent_positions[1], axis=-1))
+            + (1 * jnp.all(cell_pos == my_pos))
+            + (2 * jnp.all(cell_pos == team_pos))
         )
 
     def is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
