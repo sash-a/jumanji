@@ -29,6 +29,7 @@ else:
 class State:
     agent_positions: jax.Array  # (2, 2)
     agent_targets: jax.Array  # (2, 2)
+    same_target: jax.Array  # ()
     step_count: jax.typing.ArrayLike  # ()
     key: chex.PRNGKey  # (2,)
 

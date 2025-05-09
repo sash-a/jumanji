@@ -38,6 +38,7 @@ class TMaze(Environment):
 
         self.left_target = jnp.array([self.length, -self.width])
         self.right_target = jnp.array([self.length, 1 + self.width])
+        self.top_target_x = self.length + self.width
 
         self.start_positions = jnp.array([[0, 0], [0, 1]])
         self.target_positions = jnp.stack([self.left_target, self.right_target], axis=0)
@@ -52,16 +53,16 @@ class TMaze(Environment):
         a0_pos = self.start_positions[a0_pos_idx]
         a1_pos = self.start_positions[1 - a0_pos_idx]
 
-        a0_target_idx = jax.random.randint(target_key, (), 0, 2)
-        a0_target = self.target_positions[a0_target_idx]
-        a1_target = self.target_positions[1 - a0_target_idx]
+        target_idx = jax.random.randint(target_key, (2,), 0, 2)
+        same_target = target_idx[0] == target_idx[1]
+        targets = self.target_positions[target_idx]
 
         positions = jnp.stack([a0_pos, a1_pos], axis=0)
-        targets = jnp.stack([a0_target, a1_target], axis=0)
 
         state = State(
             agent_positions=positions,
             agent_targets=targets,
+            same_target=same_target,
             step_count=jnp.zeros((), jnp.int32),
             key=key,
         )
@@ -82,13 +83,14 @@ class TMaze(Environment):
         new_positions = moves + state.agent_positions
 
         not_colliding = jnp.any(new_positions[0] != new_positions[1])
-        valid_next_pos = jax.vmap(self.valid_position, (None, 0))(state, new_positions)
+        valid_next_pos = jax.vmap(self.empty_position, (None, 0))(state, new_positions)
         valid_move = (valid_next_pos & not_colliding) | (action == 0)  # NOOP always valid
         new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
 
         new_state = State(
             agent_positions=new_positions,
             agent_targets=state.agent_targets,
+            same_target=state.same_target,
             step_count=state.step_count + 1,
             key=state.key,
         )
@@ -97,12 +99,16 @@ class TMaze(Environment):
         )
 
         done_horizon = new_state.step_count >= self.time_limit
-        found_targets = jnp.all(new_positions == state.agent_targets)
-        reward = jnp.ones(2, dtype=jnp.float32) * found_targets
+        done_targets = jax.lax.select(
+            state.same_target,
+            jnp.all(new_positions[:, 0] == self.top_target_x),
+            jnp.all(new_positions == state.agent_targets),
+        )
+        reward = jnp.ones(2, dtype=jnp.float32) * done_targets
 
         step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
         obs = Observation(self.get_obs(new_state), action_mask, step_count)
-        ts = jax.lax.cond(done_horizon | found_targets, termination, transition, reward, obs)
+        ts = jax.lax.cond(done_horizon | done_targets, termination, transition, reward, obs)
         ts.extras = {"env_metrics": {}}
         return new_state, ts
 
@@ -144,14 +150,14 @@ class TMaze(Environment):
 
     def is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
         x, y = cell_pos
-        is_on_vertical = (x >= 0) & (x < self.length)
+        is_on_vertical = (x >= 0) & (x <= self.length + self.width)
         is_on_horizontal = x == self.length
 
         return (is_on_vertical & ((y == 0) | (y == 1))) | (
             is_on_horizontal & (y >= -self.width) & (y <= 1 + self.width)
         )
 
-    def valid_position(self, state: State, new_position: jax.Array) -> jax.Array:
+    def empty_position(self, state: State, new_position: jax.Array) -> jax.Array:
         return (
             self.is_cell_in_bounds(new_position)
             # not on top of an agent
@@ -176,7 +182,7 @@ class TMaze(Environment):
 
     def get_action_mask(self, state: State, my_pos: jax.Array) -> jax.Array:
         possible_pos = my_pos + self.moves
-        mask = jax.vmap(self.valid_position, (None, 0))(state, possible_pos)
+        mask = jax.vmap(self.empty_position, (None, 0))(state, possible_pos)
         return mask.at[0].set(True)  # NOOP always valid
 
     @cached_property
