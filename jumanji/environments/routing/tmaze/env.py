@@ -13,15 +13,17 @@
 # limitations under the License.
 
 from functools import cached_property
-from typing import Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import chex
 import jax
 import jax.numpy as jnp
+import matplotlib
 
 from jumanji import Environment, specs
 from jumanji.environments.routing.tmaze.types import Observation, State
 from jumanji.types import StepType, TimeStep, termination, transition
+from jumanji.environments.routing.tmaze.viewer import TmazeViewer
 
 
 class TMaze(Environment):
@@ -45,6 +47,8 @@ class TMaze(Environment):
 
         # NOOP, UP, RIGHT, DOWN, LEFT
         self.moves = jnp.array([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]])
+
+        self.viewer = TmazeViewer(length=length, width=width)
 
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
         key, position_key, target_key = jax.random.split(key, 3)
@@ -213,3 +217,14 @@ class TMaze(Environment):
         return specs.MultiDiscreteArray(
             num_values=jnp.array([5] * 2), dtype=jnp.int32, name="action"
         )
+
+    def render(self, state: State) -> Any:
+        return self.viewer.render(state)
+
+    def animate(
+        self,
+        states: Sequence[State],
+        interval: int = 200,
+        save_path: Optional[str] = None,
+    ) -> matplotlib.animation.FuncAnimation:
+        return self.viewer.animate(states, interval, save_path)
