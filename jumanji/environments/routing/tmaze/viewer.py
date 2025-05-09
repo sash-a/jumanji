@@ -25,17 +25,13 @@ class TmazeViewer:
         """
         self.length = length
         self.width = width
-        self.height = width
+        self.height = width  # Assuming this was an intended change from self.height = 2
         self.top_target_x = length + width
 
-        self.colors = {
-            -1: (0.5, 0.5, 0.5, 1.0),  # Out of bounds/empty: Grey
-            0: (1.0, 1.0, 1.0, 1.0),  # Empty cell: White
-            1: (0.0, 0.0, 1.0, 1.0),  # Agent 1: Blue
-            2: (1.0, 0.0, 0.0, 1.0),  # Agent 2: Red
-        }
+        # Agent colors are now dynamic based on targets, so no fixed agent colors here.
+        self.path_color = (1.0, 1.0, 1.0, 1.0)  # White for empty cells
 
-        self.target_colors = {
+        self.target_colors_dict = {
             0: (0.0, 1.0, 0.0, 1.0),  # Target for agent with target index 0: Green
             1: (1.0, 0.5, 0.0, 1.0),  # Target for agent with target index 1: Orange
             2: (0.5, 0.0, 1.0, 1.0),  # Purple for shared target
@@ -83,17 +79,41 @@ class TmazeViewer:
                     continue
                 self._draw_grid_cell(x, y, ax)
 
-        # Draw the agents
-        self._draw_agent(state.agent_positions[0], 1, ax)
-        self._draw_agent(state.agent_positions[1], 2, ax)
+        # Determine agent colors based on targets
+        agent_0_color_idx = 0  # Default to first target color
+        agent_1_color_idx = 1  # Default to second target color
+
+        if state.same_target:
+            agent_0_color = self.target_colors_dict[2]
+            agent_1_color = self.target_colors_dict[2]
+        else:
+            # Find which target index (0 or 1) corresponds to agent_targets[0]
+            # This assumes self.left_target corresponds to index 0 and self.right_target to index 1
+            # from the environment's target_positions array.
+            # A more robust way would be to pass the target indices directly in the state if available.
+            left_target_env = jnp.array([self.length, -self.width])  # Reconstruct from env logic
+
+            if jnp.array_equal(state.agent_targets[0], left_target_env):
+                agent_0_color_idx = 0
+                agent_1_color_idx = 1
+            else:  # agent_targets[0] must be the right_target
+                agent_0_color_idx = 1
+                agent_1_color_idx = 0
+
+            agent_0_color = self.target_colors_dict[agent_0_color_idx]
+            agent_1_color = self.target_colors_dict[agent_1_color_idx]
+
+        # Draw the agents with their target colors
+        self._draw_agent(state.agent_positions[0], agent_0_color, ax)
+        self._draw_agent(state.agent_positions[1], agent_1_color, ax)
 
         # Draw the targets, handling the same_target case
         if state.same_target:
             self._draw_shared_target(jnp.array([self.top_target_x + 0.5, 0.5]), ax)
             self._draw_shared_target(jnp.array([self.top_target_x + 0.5, 1.5]), ax)
         else:
-            self._draw_target(state.agent_targets[0], 0, ax)
-            self._draw_target(state.agent_targets[1], 1, ax)
+            self._draw_target(state.agent_targets[0], agent_0_color_idx, ax)
+            self._draw_target(state.agent_targets[1], agent_1_color_idx, ax)
 
     def _is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
         """Checks if a cell is within the bounds of the TMaze, including the extended corridor."""
@@ -107,25 +127,25 @@ class TmazeViewer:
 
     def _draw_grid_cell(self, col: int, row: int, ax: plt.Axes) -> None:
         """Draws a single grid cell."""
-        cell_value = 0  # Default to empty
-
         cell = Rectangle(
-            (col, row), 1, 1, facecolor=self.colors[cell_value], edgecolor="black", linewidth=1
+            (col, row), 1, 1, facecolor=self.path_color, edgecolor="black", linewidth=1
         )
         ax.add_patch(cell)
 
-    def _draw_agent(self, position: jax.Array, agent_id: int, ax: plt.Axes) -> None:
-        """Draws an agent as a circle."""
+    def _draw_agent(
+        self, position: jax.Array, agent_color: Tuple[float, float, float, float], ax: plt.Axes
+    ) -> None:
+        """Draws an agent as a circle with the specified color."""
         x, y = position
-        circle = Circle((x + 0.5, y + 0.5), 0.4, color=self.colors[agent_id])
+        circle = Circle((x + 0.5, y + 0.5), 0.4, color=agent_color)
         ax.add_patch(circle)
 
-    def _draw_target(self, position: jax.Array, target_id: int, ax: plt.Axes) -> None:
+    def _draw_target(self, position: jax.Array, target_color_idx: int, ax: plt.Axes) -> None:
         """Draws a target as a triangle."""
         x, y = position
         triangle = Polygon(
             [[x + 0.5, y + 0.8], [x + 0.2, y + 0.2], [x + 0.8, y + 0.2]],
-            color=self.target_colors[target_id],
+            color=self.target_colors_dict[target_color_idx],
         )
         ax.add_patch(triangle)
 
@@ -134,7 +154,7 @@ class TmazeViewer:
         x, y = position
         diamond = Polygon(
             [[x, y + 0.4], [x + 0.4, y], [x, y - 0.4], [x - 0.4, y]],
-            color=self.target_colors[2],  # Use purple for shared target
+            color=self.target_colors_dict[2],  # Use purple for shared target
         )
         ax.add_patch(diamond)
 
@@ -147,7 +167,7 @@ class TmazeViewer:
         """Create an animation from a sequence of TMaze grids.
 
         Args:
-            grids: sequence of TMaze grids corresponding to consecutive timesteps.
+            states: sequence of TMaze states corresponding to consecutive timesteps.
             interval: delay between frames in milliseconds, default to 200.
             save_path: the path where the animation file should be saved. If it is None, the plot
                 will not be saved.
@@ -156,7 +176,7 @@ class TmazeViewer:
             Animation that can be saved as a GIF, MP4, or rendered with HTML.
         """
         fig, ax = self.fig, self.ax  # Reuse existing figure and axes
-        plt.close(fig=fig)
+        plt.close(fig=fig)  # Close the static plot before starting animation
 
         def make_frame(state) -> Tuple[Artist]:
             ax.clear()
