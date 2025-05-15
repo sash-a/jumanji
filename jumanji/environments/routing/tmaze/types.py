@@ -28,8 +28,8 @@ else:
 @dataclass
 class State:
     agent_positions: jax.Array  # (2, 2)
-    agent_targets: jax.Array  # (2, 2)
-    same_target: jax.Array  # ()
+    agent_targets: jax.Array  # (2)  agents target choice: 0 or 1 to index into target positions
+    target_positions: jax.Array  # (2, 2) location of the target at this index
     step_count: jax.typing.ArrayLike  # ()
     key: chex.PRNGKey  # (2,)
 

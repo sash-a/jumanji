@@ -22,8 +22,8 @@ import matplotlib
 
 from jumanji import Environment, specs
 from jumanji.environments.routing.tmaze.types import Observation, State
-from jumanji.types import StepType, TimeStep, termination, transition
 from jumanji.environments.routing.tmaze.viewer import TmazeViewer
+from jumanji.types import StepType, TimeStep, termination, transition
 
 
 class TMaze(Environment):
@@ -40,13 +40,12 @@ class TMaze(Environment):
 
         self.left_target = jnp.array([self.length, -self.width])
         self.right_target = jnp.array([self.length, 1 + self.width])
-        self.top_target_x = self.length + self.width
 
         self.start_positions = jnp.array([[0, 0], [0, 1]])
         self.target_positions = jnp.stack([self.left_target, self.right_target], axis=0)
 
-        # NOOP, UP, RIGHT, DOWN, LEFT
-        self.moves = jnp.array([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]])
+        # NOOP, UP, RIGHT, DOWN, LEFT, CHOOSE_0, CHOOSE_1
+        self.moves = jnp.array([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1], [0, 0], [0, 0]])
 
         self.viewer = TmazeViewer(length=length, width=width)
 
@@ -57,20 +56,21 @@ class TMaze(Environment):
         a0_pos = self.start_positions[a0_pos_idx]
         a1_pos = self.start_positions[1 - a0_pos_idx]
 
-        target_idx = jax.random.randint(target_key, (2,), 0, 2)
-        same_target = target_idx[0] == target_idx[1]
+        a0_target_idx = jax.random.randint(target_key, (), 0, 2)
+        target_idx = jnp.array([a0_target_idx, 1 - a0_target_idx])
         targets = self.target_positions[target_idx]
 
         positions = jnp.stack([a0_pos, a1_pos], axis=0)
 
         state = State(
             agent_positions=positions,
-            agent_targets=targets,
-            same_target=same_target,
+            agent_targets=-jnp.ones(2, dtype=jnp.int32),  # only choose on first step
+            target_positions=targets,
             step_count=jnp.zeros((), jnp.int32),
             key=key,
         )
-        action_mask = jax.vmap(self.get_action_mask, (None, 0))(state, state.agent_positions)
+        single_agent_reset_mask = self.get_reset_action_mask()
+        action_mask = jnp.tile(single_agent_reset_mask[jnp.newaxis, :], (self.num_agents, 0))
         obs = Observation(self.get_obs(state), action_mask, jnp.zeros((2,), jnp.int32))
 
         ts = TimeStep(
@@ -83,6 +83,25 @@ class TMaze(Environment):
         return state, ts
 
     def step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
+        return jax.lax.cond(state.step_count == 0, self.choose_step, self.move_step, state, action)
+
+    def choose_step(self, state: State, action: jax.Array) -> Tuple[State, TimeStep[Observation]]:
+        # assert jnp.all(action > 5), "On the first step your action must be 6 or 7 (choose)"
+        agent_targets = (action == 6).astype(int)
+        new_state = state.replace(agent_targets=agent_targets, step_count=state.step_count + 1)
+
+        action_mask = jax.vmap(self.get_step_action_mask, (None, 0))(
+            new_state, new_state.agent_positions
+        )
+        step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
+        obs = Observation(self.get_obs(new_state), action_mask, step_count)
+        ts = transition(jnp.zeros(2, jnp.float32), obs)
+        ts.extras = {"env_metrics": {}}
+
+        return new_state, ts
+
+    def move_step(self, state: State, action: chex.Array) -> Tuple[State, TimeStep[Observation]]:
+        # assert jnp.all(action <= 5)
         moves = self.moves[action]
         new_positions = moves + state.agent_positions
 
@@ -91,29 +110,27 @@ class TMaze(Environment):
         valid_move = (valid_next_pos & not_colliding) | (action == 0)  # NOOP always valid
         new_positions = jnp.where(valid_move[:, jnp.newaxis], new_positions, state.agent_positions)
 
-        new_state = State(
-            agent_positions=new_positions,
-            agent_targets=state.agent_targets,
-            same_target=state.same_target,
-            step_count=state.step_count + 1,
-            key=state.key,
-        )
-        action_mask = jax.vmap(self.get_action_mask, (None, 0))(
+        new_state = state.replace(agent_positions=new_positions, step_count=state.step_count + 1)
+        action_mask = jax.vmap(self.get_step_action_mask, (None, 0))(
             new_state, new_state.agent_positions
         )
 
         done_horizon = new_state.step_count >= self.time_limit
-        done_targets = jax.lax.select(
-            state.same_target,
-            jnp.all(new_positions[:, 0] == self.top_target_x),
-            jnp.all(new_positions == state.agent_targets),
-        )
+        done_targets = jnp.all(new_positions == state.target_positions[state.agent_targets])
         reward = jnp.ones(2, dtype=jnp.float32) * done_targets
 
         step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
         obs = Observation(self.get_obs(new_state), action_mask, step_count)
         ts = jax.lax.cond(done_horizon | done_targets, termination, transition, reward, obs)
         ts.extras = {"env_metrics": {}}
+
+        # jax.debug.print(
+        #     "Ag pos: {a} | targs: {t} | ordered targs: {o}",
+        #     a=new_positions,
+        #     t=state.target_positions,
+        #     o=state.target_positions[state.agent_targets],
+        # )
+
         return new_state, ts
 
     def get_obs(self, state: State) -> jax.Array:
@@ -122,12 +139,12 @@ class TMaze(Environment):
 
         target_obs = jax.lax.cond(
             state.step_count == 0,
-            lambda: jnp.all((state.agent_targets == self.left_target), axis=-1).astype(jnp.int32),
-            lambda: jnp.array([-1, -1]),
+            lambda: -jnp.ones_like(state.target_positions),  # first target positions are unkown
+            lambda: state.target_positions,
         )
 
         obs = jnp.stack([a0_obs, a1_obs], axis=0)
-        obs = jnp.concatenate([obs, target_obs[:, jnp.newaxis]], axis=-1)
+        obs = jnp.concatenate([obs, target_obs], axis=-1)
         return obs
 
     def get_agent_obs(
@@ -154,7 +171,7 @@ class TMaze(Environment):
 
     def is_cell_in_bounds(self, cell_pos: jax.Array) -> bool:
         x, y = cell_pos
-        is_on_vertical = (x >= 0) & (x <= self.length + self.width)
+        is_on_vertical = (x >= 0) & (x <= self.length)
         is_on_horizontal = x == self.length
 
         return (is_on_vertical & ((y == 0) | (y == 1))) | (
@@ -184,10 +201,35 @@ class TMaze(Environment):
         )
         return cell_pos + surrounding_vecs
 
-    def get_action_mask(self, state: State, my_pos: jax.Array) -> jax.Array:
-        possible_pos = my_pos + self.moves
-        mask = jax.vmap(self.empty_position, (None, 0))(state, possible_pos)
-        return mask.at[0].set(True)  # NOOP always valid
+    def get_reset_action_mask(self) -> jax.Array:
+        """
+        Generates the action mask for a single agent at the reset step (step 0).
+        Only CHOOSE_0 (action 5) and CHOOSE_1 (action 6) are allowed.
+        """
+        # Total 7 actions: 0-4 are movement/NOOP, 5-6 are CHOOSE actions.
+        mask = jnp.zeros(7, dtype=bool)
+        # Allow action 5 (CHOOSE_0) and action 6 (CHOOSE_1)
+        mask = mask.at[5:7].set(True)
+        return mask
+
+    def get_step_action_mask(self, state: State, my_pos: jax.Array) -> jax.Array:
+        """
+        Generates the action mask for a single agent for steps > 0.
+        Movement actions (0-4) are allowed based on validity, NOOP is always True.
+        CHOOSE actions (5-6) are never allowed after the first step.
+        """
+        # Calculate mask for movement actions (0-4: NOOP, UP, RIGHT, DOWN, LEFT)
+        # self.moves[:5] corresponds to these actions.
+        possible_movement_pos = my_pos + self.moves[:5]
+        movement_mask_parts = jax.vmap(self.empty_position, (None, 0))(state, possible_movement_pos)
+
+        # Ensure NOOP (action 0) is always valid among the movement actions
+        movement_mask_final = movement_mask_parts.at[0].set(True)
+
+        # Actions 5 and 6 (CHOOSE actions) are always False after the initial step
+        choice_actions_mask = jnp.array([False, False], dtype=bool)
+
+        return jnp.concatenate([movement_mask_final, choice_actions_mask])
 
     @cached_property
     def observation_spec(self) -> specs.Spec[Observation]:
@@ -195,7 +237,7 @@ class TMaze(Environment):
             shape=(2, 10), dtype=jnp.int32, name="grid", minimum=-1, maximum=2
         )
         action_mask = specs.BoundedArray(
-            shape=(2, 5), dtype=bool, minimum=False, maximum=True, name="action_mask"
+            shape=(2, 7), dtype=bool, minimum=False, maximum=True, name="action_mask"
         )
         step_count = specs.BoundedArray(
             shape=(2,),
