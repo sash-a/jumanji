@@ -36,7 +36,7 @@ class TMaze(Environment):
 
         # Mava params
         self.num_agents = 2
-        self.action_dim = 5
+        self.action_dim = 7
 
         self.left_target = jnp.array([self.length, -self.width])
         self.right_target = jnp.array([self.length, 1 + self.width])
@@ -70,8 +70,12 @@ class TMaze(Environment):
             key=key,
         )
         single_agent_reset_mask = self.get_reset_action_mask()
-        action_mask = jnp.tile(single_agent_reset_mask[jnp.newaxis, :], (self.num_agents, 0))
-        obs = Observation(self.get_obs(state), action_mask, jnp.zeros((2,), jnp.int32))
+        action_mask = jnp.tile(single_agent_reset_mask[jnp.newaxis, :], (self.num_agents, 1))
+        obs = Observation(
+            jnp.zeros_like(self.get_obs(state, -jnp.ones((2,), jnp.int32))),
+            action_mask,
+            jnp.zeros((2,), jnp.int32),
+        )
 
         ts = TimeStep(
             step_type=StepType.FIRST,
@@ -94,7 +98,7 @@ class TMaze(Environment):
             new_state, new_state.agent_positions
         )
         step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
-        obs = Observation(self.get_obs(new_state), action_mask, step_count)
+        obs = Observation(self.get_obs(new_state, action), action_mask, step_count)
         ts = transition(jnp.zeros(2, jnp.float32), obs)
         ts.extras = {"env_metrics": {}}
 
@@ -120,7 +124,7 @@ class TMaze(Environment):
         reward = jnp.ones(2, dtype=jnp.float32) * done_targets
 
         step_count = jnp.full((2,), new_state.step_count, dtype=jnp.int32)
-        obs = Observation(self.get_obs(new_state), action_mask, step_count)
+        obs = Observation(self.get_obs(new_state, action), action_mask, step_count)
         ts = jax.lax.cond(done_horizon | done_targets, termination, transition, reward, obs)
         ts.extras = {"env_metrics": {}}
 
@@ -133,18 +137,19 @@ class TMaze(Environment):
 
         return new_state, ts
 
-    def get_obs(self, state: State) -> jax.Array:
+    def get_obs(self, state: State, action: jax.Array) -> jax.Array:
         a0_obs = self.get_agent_obs(state, state.agent_positions[0], state.agent_positions[1])
         a1_obs = self.get_agent_obs(state, state.agent_positions[1], state.agent_positions[0])
 
         target_obs = jax.lax.cond(
             state.step_count == 0,
-            lambda: -jnp.ones_like(state.target_positions),  # first target positions are unkown
-            lambda: state.target_positions,
+            lambda: -jnp.ones((2,), dtype=a0_obs.dtype),  # first target positions are unkown
+            lambda: jnp.repeat((state.target_positions[0, 1] < 0), 2).astype(a0_obs.dtype),
         )
 
         obs = jnp.stack([a0_obs, a1_obs], axis=0)
-        obs = jnp.concatenate([obs, target_obs], axis=-1)
+        act_obs = (action[:, jnp.newaxis] == 6) + jnp.all(action > 5)
+        obs = jnp.concatenate([obs, target_obs[:, jnp.newaxis], act_obs], axis=-1)
         return obs
 
     def get_agent_obs(
@@ -234,7 +239,7 @@ class TMaze(Environment):
     @cached_property
     def observation_spec(self) -> specs.Spec[Observation]:
         agents_view = specs.BoundedArray(
-            shape=(2, 10), dtype=jnp.int32, name="grid", minimum=-1, maximum=2
+            shape=(2, 11), dtype=jnp.int32, name="grid", minimum=-1, maximum=2
         )
         action_mask = specs.BoundedArray(
             shape=(2, 7), dtype=bool, minimum=False, maximum=True, name="action_mask"
@@ -257,7 +262,7 @@ class TMaze(Environment):
     @cached_property
     def action_spec(self) -> specs.MultiDiscreteArray:
         return specs.MultiDiscreteArray(
-            num_values=jnp.array([5] * 2), dtype=jnp.int32, name="action"
+            num_values=jnp.array([7] * 2), dtype=jnp.int32, name="action"
         )
 
     def render(self, state: State) -> Any:
